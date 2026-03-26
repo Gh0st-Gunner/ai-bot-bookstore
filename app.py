@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import ollama
+import re
 
 # Session state initialization
 if 'cart' not in st.session_state:
@@ -11,6 +12,8 @@ if 'messages' not in st.session_state:
     st.session_state.messages = []
 if 'bought' not in st.session_state:
     st.session_state.bought = []
+if 'ai_available' not in st.session_state:
+    st.session_state.ai_available = False
 
 def search_books(query):
     """Search books using OpenLibrary API"""
@@ -46,8 +49,70 @@ def clear_cart():
     """Clear the cart"""
     st.session_state.cart = []
 
+def process_input_fallback(user_input):
+    """Handle basic search/cart operations when AI is unavailable."""
+    text = user_input.strip()
+    lower_text = text.lower()
+    executed_actions = []
+
+    if any(k in lower_text for k in ["view cart", "show cart", "cart"]):
+        if not st.session_state.cart:
+            executed_actions.append("🛒 Your cart is empty.")
+        else:
+            cart_info = "🛒 Your Cart:\n"
+            for i, book in enumerate(st.session_state.cart, 1):
+                cart_info += f"{i}. {book['title']} — {book['author']}\n"
+            cart_info += f"\nTotal: {len(st.session_state.cart)} items"
+            executed_actions.append(cart_info)
+
+    if "clear cart" in lower_text:
+        clear_cart()
+        executed_actions.append("Cart cleared")
+
+    if "remove " in lower_text:
+        remove_title = text[lower_text.find("remove ") + len("remove "):].strip()
+        if remove_title:
+            remove_from_cart(remove_title)
+            executed_actions.append(f"Removed '{remove_title}' from cart")
+
+    add_match = re.search(r"\badd\s+(\d+)\b", lower_text)
+    if add_match:
+        idx = int(add_match.group(1)) - 1
+        if st.session_state.last_books and 0 <= idx < len(st.session_state.last_books):
+            book = st.session_state.last_books[idx]
+            add_to_cart(book)
+            executed_actions.append(f"Added '{book['title']}' to cart")
+        else:
+            executed_actions.append("Couldn't add that book. Search first and use 'add <number>'.")
+
+    should_search = any(k in lower_text for k in ["search", "find", "books about", "recommend"])
+    if should_search:
+        query = text
+        for prefix in ["search", "find", "books about", "recommend", "recommend books"]:
+            query = re.sub(rf"^\s*{re.escape(prefix)}\s*", "", query, flags=re.IGNORECASE)
+        query = query.strip() or "books"
+        books = search_books(query)
+        st.session_state.last_books = books
+        executed_actions.append(f"Searched for '{query}' and found {len(books)} books")
+
+    if not executed_actions:
+        return (
+            "I'm currently running in offline assistant mode because Ollama is not connected. "
+            "You can still use chat commands like:\n"
+            "- search <query>\n"
+            "- add <number>\n"
+            "- view cart\n"
+            "- remove <title>\n"
+            "- clear cart"
+        )
+
+    return "Offline assistant mode (Ollama unavailable):\n\n" + "\n".join(executed_actions)
+
 def process_input(user_input):
     """Process user input using Ollama Llama model"""
+    if not st.session_state.ai_available:
+        return process_input_fallback(user_input)
+
     system_prompt = """You are an AI bookstore assistant. Help users discover books using the OpenLibrary API.
 
 Available actions (include these commands in your response when appropriate):
@@ -132,15 +197,19 @@ def main():
     # Check if Ollama is running
     try:
         ollama.list()
+        st.session_state.ai_available = True
         st.success("✅ Connected to Ollama")
     except:
-        st.error("❌ Cannot connect to Ollama.The search engine is still working as intended.")
-        st.stop()
+        st.session_state.ai_available = False
+        st.warning("⚠️ Ollama is not connected. Search, browse, and cart still work, and chat runs in basic offline mode.")
     
     # Sidebar AI Chat
     with st.sidebar:
         st.header("🤖 Ollama Llama AI Assistant")
-        st.markdown("Chat with our Ollama-powered Llama AI for personalized book recommendations!")
+        if st.session_state.ai_available:
+            st.markdown("Chat with our Ollama-powered Llama AI for personalized book recommendations!")
+        else:
+            st.markdown("Ollama is offline. Use basic commands: `search <query>`, `add <number>`, `view cart`, `remove <title>`, `clear cart`.")
         
         # Chat container
         chat_container = st.container(height=400)
@@ -211,7 +280,8 @@ def main():
     
     with tab2:
         st.header("AI-Powered Recommendations")
-        st.markdown("""
+        if st.session_state.ai_available:
+            st.markdown("""
         Use the Llama AI assistant in the sidebar to get personalized recommendations!
         
         The AI can understand natural language and help you discover books based on:
@@ -219,6 +289,15 @@ def main():
         - Authors and series
         - Mood and preferences
         - Similar books to ones you like
+        """)
+        else:
+            st.markdown("""
+        Ollama is currently offline.
+
+        You can still:
+        - Search books in the Search tab
+        - Add/remove books from your cart
+        - Use basic sidebar chat commands (`search`, `add`, `view cart`, `remove`, `clear cart`)
         """)
         
         if st.session_state.last_books:
